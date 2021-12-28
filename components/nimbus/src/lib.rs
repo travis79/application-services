@@ -33,6 +33,8 @@ use evaluator::is_experiment_available;
 // Exposed for Example only
 pub use evaluator::TargetingAttributes;
 
+mod glean_metrics;
+
 // We only use this in a test, and with --no-default-features, we don't use it
 // at all
 #[allow(unused_imports)]

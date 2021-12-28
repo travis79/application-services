@@ -8,6 +8,8 @@ use crate::persistence::{Database, StoreId, Writer};
 use crate::{evaluator::evaluate_enrollment, persistence::Readable};
 use crate::{AvailableRandomizationUnits, EnrolledExperiment, Experiment, FeatureConfig};
 
+use crate::glean_metrics::nimbus_events;
+
 use ::uuid::Uuid;
 use serde_derive::*;
 use std::{
