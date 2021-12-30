@@ -41,6 +41,7 @@ mod glean_metrics;
 #[allow(unused_imports)]
 use enrollment::EnrollmentChangeEventType;
 
+use glean_metrics::nimbus_events::{self, ExposureExtra};
 pub use matcher::AppContext;
 use once_cell::sync::OnceCell;
 use persistence::{Database, StoreId, Writer};
@@ -238,6 +239,20 @@ impl NimbusClient {
         write_pending_experiments(db, &mut writer, new_experiments)?;
         writer.commit()?;
         Ok(())
+    }
+
+    pub fn record_exposure(&self, feature_id: String) -> Result<()> {
+        return match self.get_active_experiments()?.iter().find(|exp| exp.feature_ids.contains(&feature_id)) {
+            Some(exp) => {
+                nimbus_events::exposure.record(ExposureExtra {
+                    branch: Some(exp.branch_slug.clone()),
+                    enrollment_id: Some(exp.enrollment_id.clone()),
+                    experiment: Some(exp.slug.clone()),
+                });
+                Ok(())
+            },
+            None => Ok(()),
+        }
     }
 
     pub fn apply_pending_experiments(&self) -> Result<Vec<EnrollmentChangeEvent>> {

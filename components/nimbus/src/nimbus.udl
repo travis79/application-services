@@ -110,6 +110,16 @@ interface NimbusClient {
     [Throws=NimbusError]
     string? get_feature_config_variables(string feature_id);
 
+    // Records an exposure event for the given feature_id. When using manual
+    // exposure events, the application should call this each time that the
+    // user is "exposed" to the feature, and Nimbus will handle recording the
+    // event correctly, regardless of if the feature is under experimentation
+    // or not. This should also be called in the place a user would have seen
+    // a feature, in the case of a "control" branch where a user doesn't have
+    // a "treatment" to see. This helps validate the experimental results.
+    [Throws=NimbusError]
+    void record_exposure(string feature_id);
+
     // Returns a list of experiment branches for a given experiment ID.
     [Throws=NimbusError]
     sequence<ExperimentBranch> get_experiment_branches(string experiment_slug);
