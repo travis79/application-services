@@ -55,20 +55,6 @@ dictionary AvailableRandomizationUnits {
     i8 dummy;
 };
 
-dictionary EnrollmentChangeEvent {
-    string experiment_slug;
-    string branch_slug;
-    string enrollment_id;
-    string? reason;
-    EnrollmentChangeEventType change;
-};
-
-enum EnrollmentChangeEventType {
-    "Enrollment",
-    "Disqualification",
-    "Unenrollment",
-};
-
 [Error]
 enum NimbusError {
     "InvalidPersistedData", "RkvError", "IOError",
@@ -141,13 +127,13 @@ interface NimbusClient {
     boolean get_global_user_participation();
 
     [Throws=NimbusError]
-    sequence<EnrollmentChangeEvent> set_global_user_participation(boolean opt_in);
+    void set_global_user_participation(boolean opt_in);
 
     // Updates the list of experiments from the server.
     // This method is deprecated, in favour of calling `fetch_experiments()` and then
     // `apply_pending_updates()`.
     [Throws=NimbusError]
-    sequence<EnrollmentChangeEvent> update_experiments();
+    void update_experiments();
 
     // Fetches the list of experiments from the server. This does not affect the list
     // of active experiments or experiment enrolment.
@@ -159,7 +145,7 @@ interface NimbusClient {
     // After calling this, the list of active experiments might change
     // (there might be new experiments, or old experiments might have expired).
     [Throws=NimbusError]
-    sequence<EnrollmentChangeEvent> apply_pending_experiments();
+    void apply_pending_experiments();
 
     // A convenience method for apps to set the experiments from a local source
     // for either testing, or before the first fetch has finished.
@@ -174,11 +160,11 @@ interface NimbusClient {
     // Opt in to a specific branch on a specific experiment. Useful for
     // developers to test their app's interaction with the experiment.
     [Throws=NimbusError]
-    sequence<EnrollmentChangeEvent> opt_in_with_branch(string experiment_slug, string branch);
+    void opt_in_with_branch(string experiment_slug, string branch);
 
     // Opt out of a specific experiment.
     [Throws=NimbusError]
-    sequence<EnrollmentChangeEvent> opt_out(string experiment_slug);
+    void opt_out(string experiment_slug);
 
     // Reset internal state in response to application-level telemetry reset.
     //
@@ -195,5 +181,5 @@ interface NimbusClient {
     //      misleading incomplete data.
     //
     [Throws=NimbusError]
-    sequence<EnrollmentChangeEvent> reset_telemetry_identifiers(AvailableRandomizationUnits new_randomization_units);
+    void reset_telemetry_identifiers(AvailableRandomizationUnits new_randomization_units);
 };

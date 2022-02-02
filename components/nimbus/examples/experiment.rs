@@ -2,18 +2,47 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
-use clap::{App, Arg, SubCommand};
+use clap::{App, Arg, SubCommand, crate_version};
 use env_logger::Env;
+use glean::net::PingUploader;
 use nimbus::TargetingAttributes;
 use nimbus::{
     error::Result, AppContext, AvailableRandomizationUnits, EnrollmentStatus, NimbusClient,
     RemoteSettingsConfig,
 };
+use url::Url;
 use std::collections::HashMap;
 use std::io::prelude::*;
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::{thread, time};
+
+use glean;
 
 const DEFAULT_BASE_URL: &str = "https://firefox.settings.services.mozilla.com";
 const DEFAULT_COLLECTION_NAME: &str = "messaging-experiments";
+
+#[derive(Debug)]
+pub struct NimbusUploader;
+
+impl PingUploader for NimbusUploader {
+    fn upload(&self, url: String, body: Vec<u8>, headers: Vec<(String, String)>) -> glean::net::UploadResult {
+        let response = viaduct::Request::new(
+            viaduct::Method::Post,
+            Url::from_str(&url).unwrap()
+        )
+        .body(body)
+        .headers(headers.into_iter().map(|(name, value)| {
+            viaduct::Header::new(name, value).unwrap()
+        }))
+        .send();
+        return match response {
+            Ok(response) => glean::net::UploadResult::HttpStatus(response.status.into()),
+            Err(_) => glean::net::UploadResult::UnrecoverableFailure,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // We set the logging level to be `warn` here, meaning that only
     // logs of `warn` or higher will be actually be shown, any other
@@ -189,12 +218,32 @@ fn main() -> Result<()> {
         });
     log::info!("Database directory is {}", db_path);
 
+    // Initialize Glean
+    glean::initialize(
+        glean::Configuration {
+            upload_enabled: true,
+            data_path: PathBuf::from(db_path),
+            application_id: "mozilla.nimbus.example".to_string(),
+            delay_ping_lifetime_io: false,
+            channel: Some("example".to_string()),
+            use_core_mps: true,
+            max_events: None,
+            server_endpoint: None,
+            uploader: Some(Box::new(NimbusUploader)),
+        },
+        glean::ClientInfoMetrics {
+            app_build: env!("CARGO_PKG_VERSION").to_string(),
+            app_display_version: crate_version!().to_string(),
+        },
+    );
+
     // initiate the optional config
     let config = RemoteSettingsConfig {
         server_url: server_url.to_string(),
         collection_name: collection_name.to_string(),
     };
 
+    // Setup randomization unit
     let aru = AvailableRandomizationUnits::with_client_id(&client_id);
 
     // Here we initialize our main `NimbusClient` struct
@@ -371,5 +420,15 @@ fn main() -> Result<()> {
         }
         (&_, _) => println!("Invalid subcommand"),
     };
+
+    nimbus_client.record_exposure("home_screen".to_string())?;
+
+    glean::set_debug_view_tag("nimbus-example");
+    glean::submit_ping_by_name("events", None);
+
+    thread::sleep(time::Duration::from_millis(1000));
+
+    glean::shutdown();
+
     Ok(())
 }

@@ -1,8 +1,8 @@
 {
     "context": {
-        "app_id": "org.mozilla.fenix",
+        "app_id": "org.mozilla.firefox",
         "app_name": "fenix",
-        "channel": "nightly",
+        "channel": "release",
         "locale": "en-US"
     },
     "collection_name": "nimbus-mobile-experiments",

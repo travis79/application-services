@@ -18,15 +18,11 @@ import androidx.annotation.WorkerThread
 import androidx.core.content.pm.PackageInfoCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import mozilla.components.service.glean.Glean
 import org.json.JSONObject
-import org.mozilla.experiments.nimbus.GleanMetrics.NimbusEvents
 import org.mozilla.experiments.nimbus.internal.AppContext
 import org.mozilla.experiments.nimbus.internal.AvailableExperiment
 import org.mozilla.experiments.nimbus.internal.AvailableRandomizationUnits
 import org.mozilla.experiments.nimbus.internal.EnrolledExperiment
-import org.mozilla.experiments.nimbus.internal.EnrollmentChangeEvent
-import org.mozilla.experiments.nimbus.internal.EnrollmentChangeEventType
 import org.mozilla.experiments.nimbus.internal.ExperimentBranch
 import org.mozilla.experiments.nimbus.internal.NimbusException
 import org.mozilla.experiments.nimbus.internal.NimbusClient
@@ -445,7 +441,7 @@ open class Nimbus(
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun applyPendingExperimentsOnThisThread() = withCatchAll {
         try {
-            nimbusClient.applyPendingExperiments().also(::recordExperimentTelemetryEvents)
+            nimbusClient.applyPendingExperiments()
             // Get the experiments to record in telemetry
             postEnrolmentCalculation()
         } catch (e: NimbusException.InvalidExperimentFormat) {
@@ -456,7 +452,6 @@ open class Nimbus(
     @WorkerThread
     private fun postEnrolmentCalculation() {
         nimbusClient.getActiveExperiments().let {
-            recordExperimentTelemetry(it)
             observer?.onUpdatesApplied(it)
         }
     }
@@ -488,11 +483,7 @@ open class Nimbus(
     @WorkerThread
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun setGlobalUserParticipationOnThisThread(active: Boolean) = withCatchAll {
-        val enrolmentChanges = nimbusClient.setGlobalUserParticipation(active)
-        if (enrolmentChanges.isNotEmpty()) {
-            recordExperimentTelemetryEvents(enrolmentChanges)
-            postEnrolmentCalculation()
-        }
+        nimbusClient.setGlobalUserParticipation(active)
     }
 
     override fun optOut(experimentId: String) {
@@ -506,7 +497,7 @@ open class Nimbus(
     @WorkerThread
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     internal fun optOutOnThisThread(experimentId: String) {
-        nimbusClient.optOut(experimentId).also(::recordExperimentTelemetryEvents)
+        nimbusClient.optOut(experimentId)
     }
 
     override fun resetTelemetryIdentifiers() {
@@ -515,9 +506,7 @@ open class Nimbus(
         val aru = AvailableRandomizationUnits(clientId = null, dummy = 0)
         dbScope.launch {
             withCatchAll {
-                nimbusClient.resetTelemetryIdentifiers(aru).also { enrollmentChangeEvents ->
-                    recordExperimentTelemetryEvents(enrollmentChangeEvents)
-                }
+                nimbusClient.resetTelemetryIdentifiers(aru)
             }
         }
     }
@@ -525,56 +514,13 @@ open class Nimbus(
     override fun optInWithBranch(experimentId: String, branch: String) {
         dbScope.launch {
             withCatchAll {
-                nimbusClient.optInWithBranch(experimentId, branch).also(::recordExperimentTelemetryEvents)
+                nimbusClient.optInWithBranch(experimentId, branch)
             }
         }
     }
 
     override fun recordExposureEvent(featureId: String) {
         recordExposure(featureId)
-    }
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    internal fun recordExperimentTelemetry(experiments: List<EnrolledExperiment>) {
-        // Call Glean.setExperimentActive() for each active experiment.
-        experiments.forEach { experiment ->
-            // For now, we will just record the experiment id and the branch id. Once we can call
-            // Glean from Rust, this will move to the nimbus-sdk Rust core.
-            Glean.setExperimentActive(
-                experiment.slug,
-                experiment.branchSlug,
-                mapOf("enrollmentId" to experiment.enrollmentId)
-            )
-        }
-    }
-
-    @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
-    internal fun recordExperimentTelemetryEvents(enrollmentChangeEvents: List<EnrollmentChangeEvent>) {
-        enrollmentChangeEvents.forEach { event ->
-            when (event.change) {
-                EnrollmentChangeEventType.ENROLLMENT -> {
-                    NimbusEvents.enrollment.record(NimbusEvents.EnrollmentExtra(
-                        experiment = event.experimentSlug,
-                        branch = event.branchSlug,
-                        enrollmentId = event.enrollmentId
-                    ))
-                }
-                EnrollmentChangeEventType.DISQUALIFICATION -> {
-                    NimbusEvents.disqualification.record(NimbusEvents.DisqualificationExtra(
-                        experiment = event.experimentSlug,
-                        branch = event.branchSlug,
-                        enrollmentId = event.enrollmentId
-                    ))
-                }
-                EnrollmentChangeEventType.UNENROLLMENT -> {
-                    NimbusEvents.unenrollment.record(NimbusEvents.UnenrollmentExtra(
-                        experiment = event.experimentSlug,
-                        branch = event.branchSlug,
-                        enrollmentId = event.enrollmentId
-                    ))
-                }
-            }
-        }
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
@@ -589,14 +535,7 @@ open class Nimbus(
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)
     @WorkerThread
     internal fun recordExposureOnThisThread(featureId: String) = withCatchAll {
-        val activeExperiments = getActiveExperiments()
-        activeExperiments.find { it.featureIds.contains(featureId) }?.also { experiment ->
-            NimbusEvents.exposure.record(NimbusEvents.ExposureExtra(
-                experiment = experiment.slug,
-                branch = experiment.branchSlug,
-                enrollmentId = experiment.enrollmentId
-            ))
-        }
+        nimbusClient.recordExposure(featureId)
     }
 
     @VisibleForTesting(otherwise = VisibleForTesting.PRIVATE)

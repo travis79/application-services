@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 // utilities shared between tests
-use nimbus::{error::Result, AppContext, NimbusClient, RemoteSettingsConfig};
+use nimbus::{error::Result, AppContext, NimbusClient, RemoteSettingsConfig };
 
 #[allow(dead_code)] // work around https://github.com/rust-lang/rust/issues/46379
 pub fn new_test_client(identifier: &str) -> Result<NimbusClient> {

@@ -15,6 +15,7 @@ mod test {
         create_database, exactly_two_experiments, new_test_client, new_test_client_with_db,
         no_test_experiments, two_valid_experiments,
     };
+    use nimbus::glean_metrics::nimbus_events;
     #[cfg(feature = "rkv-safe-mode")]
     use nimbus::{error::Result, NimbusClient};
 
@@ -38,8 +39,8 @@ mod test {
         assert_eq!(experiments.len(), 0);
 
         // Now, the app chooses when to apply the pending updates to the experiments.
-        let events: Vec<_> = client.apply_pending_experiments()?;
-        assert_eq!(events.len(), 1);
+        client.apply_pending_experiments()?;
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
 
         let experiments = client.get_all_experiments()?;
         assert_eq!(experiments.len(), 1);
@@ -47,9 +48,9 @@ mod test {
 
         // Next time we start the app, we immediately apply pending updates,
         // but there may not be any waiting.
-        let events: Vec<_> = client.apply_pending_experiments()?;
+        client.apply_pending_experiments()?;
         // No change events
-        assert_eq!(events.len(), 0);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
 
         // Confirm that nothing has changed.
         let experiments = client.get_all_experiments()?;

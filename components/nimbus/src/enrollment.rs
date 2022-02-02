@@ -83,7 +83,6 @@ impl ExperimentEnrollment {
         available_randomization_units: &AvailableRandomizationUnits,
         targeting_attributes: &TargetingAttributes,
         experiment: &Experiment,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>,
     ) -> Result<Self> {
         Ok(if !is_user_participating {
             Self {
@@ -112,7 +111,7 @@ impl ExperimentEnrollment {
                 &enrollment
             );
             if matches!(enrollment.status, EnrollmentStatus::Enrolled { .. }) {
-                out_enrollment_events.push(enrollment.get_change_event())
+                enrollment.record_glean_event()
             }
             enrollment
         })
@@ -122,7 +121,6 @@ impl ExperimentEnrollment {
     fn from_explicit_opt_in(
         experiment: &Experiment,
         branch_slug: &str,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>,
     ) -> Result<Self> {
         if !experiment.has_branch(branch_slug) {
             return Err(NimbusError::NoSuchBranch(
@@ -134,7 +132,7 @@ impl ExperimentEnrollment {
             slug: experiment.slug.clone(),
             status: EnrollmentStatus::new_enrolled(EnrolledReason::OptIn, branch_slug),
         };
-        out_enrollment_events.push(enrollment.get_change_event());
+        enrollment.record_glean_event();
         Ok(enrollment)
     }
 
@@ -146,7 +144,6 @@ impl ExperimentEnrollment {
         available_randomization_units: &AvailableRandomizationUnits,
         targeting_attributes: &TargetingAttributes,
         updated_experiment: &Experiment,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>,
     ) -> Result<Self> {
         Ok(match self.status {
             EnrollmentStatus::NotEnrolled { .. } | EnrollmentStatus::Error { .. } => {
@@ -166,7 +163,7 @@ impl ExperimentEnrollment {
                         updated_enrollment
                     );
                     if matches!(updated_enrollment.status, EnrollmentStatus::Enrolled { .. }) {
-                        out_enrollment_events.push(updated_enrollment.get_change_event());
+                        updated_enrollment.record_glean_event();
                     }
                     updated_enrollment
                 }
@@ -183,13 +180,13 @@ impl ExperimentEnrollment {
                     );
                     let updated_enrollment =
                         self.disqualify_from_enrolled(DisqualifiedReason::OptOut);
-                    out_enrollment_events.push(updated_enrollment.get_change_event());
+                    updated_enrollment.record_glean_event();
                     updated_enrollment
                 } else if !updated_experiment.has_branch(branch) {
                     // The branch we were in disappeared!
                     let updated_enrollment =
                         self.disqualify_from_enrolled(DisqualifiedReason::Error);
-                    out_enrollment_events.push(updated_enrollment.get_change_event());
+                    updated_enrollment.record_glean_event();
                     updated_enrollment
                 } else if matches!(reason, EnrolledReason::OptIn) {
                     // we check if we opted-in an experiment, if so
@@ -206,7 +203,7 @@ impl ExperimentEnrollment {
                         EnrollmentStatus::Error { .. } => {
                             let updated_enrollment =
                                 self.disqualify_from_enrolled(DisqualifiedReason::Error);
-                            out_enrollment_events.push(updated_enrollment.get_change_event());
+                            updated_enrollment.record_glean_event();
                             updated_enrollment
                         }
                         EnrollmentStatus::NotEnrolled {
@@ -215,7 +212,7 @@ impl ExperimentEnrollment {
                             log::debug!("Existing experiment enrollment '{}' is now disqualified (targeting change)", &self.slug);
                             let updated_enrollment =
                                 self.disqualify_from_enrolled(DisqualifiedReason::NotTargeted);
-                            out_enrollment_events.push(updated_enrollment.get_change_event());
+                            updated_enrollment.record_glean_event();
                             updated_enrollment
                         }
                         EnrollmentStatus::NotEnrolled { .. }
@@ -258,7 +255,6 @@ impl ExperimentEnrollment {
     /// from the database after `PREVIOUS_ENROLLMENTS_GC_TIME`.
     fn on_experiment_ended(
         &self,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>,
     ) -> Option<Self> {
         log::debug!(
             "Experiment '{}' vanished while we had enrollment status of {:?}",
@@ -288,7 +284,7 @@ impl ExperimentEnrollment {
                 experiment_ended_at: now_secs(),
             },
         };
-        out_enrollment_events.push(enrollment.get_change_event());
+        enrollment.record_glean_event();
         Some(enrollment)
     }
 
@@ -296,12 +292,11 @@ impl ExperimentEnrollment {
     #[allow(clippy::unnecessary_wraps)]
     fn on_explicit_opt_out(
         &self,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>,
     ) -> ExperimentEnrollment {
         match self.status {
             EnrollmentStatus::Enrolled { .. } => {
                 let enrollment = self.disqualify_from_enrolled(DisqualifiedReason::OptOut);
-                out_enrollment_events.push(enrollment.get_change_event());
+                enrollment.record_glean_event();
                 enrollment
             }
             EnrollmentStatus::NotEnrolled { .. } => Self {
@@ -331,12 +326,11 @@ impl ExperimentEnrollment {
     ///
     fn reset_telemetry_identifiers(
         &self,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>,
     ) -> Self {
         let updated = match self.status {
             EnrollmentStatus::Enrolled { .. } => {
                 let disqualified = self.disqualify_from_enrolled(DisqualifiedReason::OptOut);
-                out_enrollment_events.push(disqualified.get_change_event());
+                disqualified.record_glean_event();
                 disqualified
             }
             EnrollmentStatus::NotEnrolled { .. }
@@ -369,78 +363,44 @@ impl ExperimentEnrollment {
 
     // Create a telemetry event describing the transition
     // to the current enrollment state.
-    fn get_change_event(&self) -> EnrollmentChangeEvent {
+    fn record_glean_event(&self) {
         match &self.status {
             EnrollmentStatus::Enrolled {
                 enrollment_id,
                 branch,
                 ..
-            } => {
-                nimbus_events::enrollment.record(
-                    nimbus_events::EnrollmentExtra {
-                        branch: Some(branch.clone()),
-                        enrollment_id: Some(enrollment_id.clone().to_string()),
-                        experiment: Some(self.slug.clone())
-                    }
-                );
-                EnrollmentChangeEvent::new(
-                    &self.slug,
-                    enrollment_id,
-                    branch,
-                    None,
-                    EnrollmentChangeEventType::Enrollment,
-                )
-            },
+            } => nimbus_events::enrollment.record(nimbus_events::EnrollmentExtra {
+                    branch: Some(branch.clone()),
+                    enrollment_id: Some(enrollment_id.clone().to_string()),
+                    experiment: Some(self.slug.clone())
+                }
+            ),
             EnrollmentStatus::WasEnrolled {
                 enrollment_id,
                 branch,
                 ..
-            } => {
-                nimbus_events::unenrollment.record(
-                    nimbus_events::UnenrollmentExtra {
-                        branch: Some(branch.clone()),
-                        enrollment_id: Some(enrollment_id.clone().to_string()),
-                        experiment: Some(self.slug.clone())
-                    }
-                );
-                EnrollmentChangeEvent::new(
-                    &self.slug,
-                    enrollment_id,
-                    branch,
-                    None,
-                    EnrollmentChangeEventType::Unenrollment,
-                )
-            },
+            } => nimbus_events::unenrollment.record(nimbus_events::UnenrollmentExtra {
+                    branch: Some(branch.clone()),
+                    enrollment_id: Some(enrollment_id.clone().to_string()),
+                    experiment: Some(self.slug.clone())
+                }
+            ),
             EnrollmentStatus::Disqualified {
                 enrollment_id,
                 branch,
                 reason,
                 ..
-            } => {
-                nimbus_events::disqualification.record(
-                    nimbus_events::DisqualificationExtra {
-                        branch: Some(branch.clone()),
-                        enrollment_id: Some(enrollment_id.clone().to_string()),
-                        experiment: Some(self.slug.clone()),
-                        reason: match reason {
-                            DisqualifiedReason::NotTargeted => Some("targeting".to_string()),
-                            DisqualifiedReason::OptOut => Some("optout".to_string()),
-                            DisqualifiedReason::Error => Some("error".to_string()),
-                        },
-                    }
-                );
-                EnrollmentChangeEvent::new(
-                    &self.slug,
-                    enrollment_id,
-                    branch,
-                    match reason {
-                        DisqualifiedReason::NotTargeted => Some("targeting"),
-                        DisqualifiedReason::OptOut => Some("optout"),
-                        DisqualifiedReason::Error => Some("error"),
+            } => nimbus_events::disqualification.record(nimbus_events::DisqualificationExtra {
+                    branch: Some(branch.clone()),
+                    enrollment_id: Some(enrollment_id.clone().to_string()),
+                    experiment: Some(self.slug.clone()),
+                    reason: match reason {
+                        DisqualifiedReason::NotTargeted => Some("targeting".to_string()),
+                        DisqualifiedReason::OptOut => Some("optout".to_string()),
+                        DisqualifiedReason::Error => Some("error".to_string()),
                     },
-                    EnrollmentChangeEventType::Disqualification,
-                )
-            },
+                }
+            ),
             EnrollmentStatus::NotEnrolled { .. } | EnrollmentStatus::Error { .. } => unreachable!(),
         }
     }
@@ -608,7 +568,7 @@ impl<'a> EnrollmentsEvolver<'a> {
         db: &Database,
         writer: &mut Writer,
         next_experiments: &[Experiment],
-    ) -> Result<Vec<EnrollmentChangeEvent>> {
+    ) -> Result<()> {
         // Get the state from the db.
         let is_user_participating = get_global_user_participation(db, writer)?;
         let experiments_store = db.get_store(StoreId::Experiments);
@@ -616,7 +576,7 @@ impl<'a> EnrollmentsEvolver<'a> {
         let prev_experiments: Vec<Experiment> = experiments_store.collect_all(writer)?;
         let prev_enrollments: Vec<ExperimentEnrollment> = enrollments_store.collect_all(writer)?;
         // Calculate the changes.
-        let (next_enrollments, enrollments_change_events) = self.evolve_enrollments(
+        let next_enrollments = self.evolve_enrollments(
             is_user_participating,
             &prev_experiments,
             next_experiments,
@@ -637,7 +597,7 @@ impl<'a> EnrollmentsEvolver<'a> {
             }
             experiments_store.put(writer, &experiment.slug, experiment)?;
         }
-        Ok(enrollments_change_events)
+        Ok(())
     }
 
     pub(crate) fn evolve_enrollments(
@@ -646,9 +606,8 @@ impl<'a> EnrollmentsEvolver<'a> {
         prev_experiments: &[Experiment],
         next_experiments: &[Experiment],
         prev_enrollments: &[ExperimentEnrollment],
-    ) -> Result<(Vec<ExperimentEnrollment>, Vec<EnrollmentChangeEvent>)> {
+    ) -> Result<Vec<ExperimentEnrollment>> {
         let mut enrollments: Vec<ExperimentEnrollment> = Default::default();
-        let mut events: Vec<EnrollmentChangeEvent> = Default::default();
 
         // Do rollouts first.
         // At the moment, we only allow one rollout per feature, so we can re-use the same machinery as experiments
@@ -660,11 +619,13 @@ impl<'a> EnrollmentsEvolver<'a> {
         let next_rollouts = filter_experiments(next_experiments, Experiment::is_rollout);
 
         // NB: Experiments require a lack of opt-out, but rollouts do not, so we set `is_user_participating` to `true`.
-        let (next_ro_enrollments, ro_events) =
-            self.evolve_enrollment_recipes(true, &prev_rollouts, &next_rollouts, &ro_enrollments)?;
+        let next_ro_enrollments = self.evolve_enrollment_recipes(
+            true,
+            &prev_rollouts,
+            &next_rollouts,
+            &ro_enrollments)?;
 
         enrollments.extend(next_ro_enrollments.into_iter());
-        events.extend(ro_events.into_iter());
 
         let ro_slugs: HashSet<String> = ro_enrollments.iter().map(|e| e.slug.clone()).collect();
 
@@ -681,7 +642,7 @@ impl<'a> EnrollmentsEvolver<'a> {
             .map(|e| e.to_owned())
             .collect();
 
-        let (next_exp_enrollments, exp_events) = self.evolve_enrollment_recipes(
+        let next_exp_enrollments = self.evolve_enrollment_recipes(
             is_user_participating,
             &prev_experiments,
             &next_experiments,
@@ -689,9 +650,8 @@ impl<'a> EnrollmentsEvolver<'a> {
         )?;
 
         enrollments.extend(next_exp_enrollments.into_iter());
-        events.extend(exp_events.into_iter());
 
-        Ok((enrollments, events))
+        Ok(enrollments)
     }
 
     /// Evolve and calculate the new set of enrollments, using the
@@ -702,8 +662,7 @@ impl<'a> EnrollmentsEvolver<'a> {
         prev_experiments: &[Experiment],
         next_experiments: &[Experiment],
         prev_enrollments: &[ExperimentEnrollment],
-    ) -> Result<(Vec<ExperimentEnrollment>, Vec<EnrollmentChangeEvent>)> {
-        let mut enrollment_events = vec![];
+    ) -> Result<Vec<ExperimentEnrollment>> {
         let prev_experiments = map_experiments(prev_experiments);
         let next_experiments = map_experiments(next_experiments);
         let prev_enrollments = map_enrollments(prev_enrollments);
@@ -736,7 +695,6 @@ impl<'a> EnrollmentsEvolver<'a> {
                 prev_experiments.get(slug).copied(),
                 next_experiments.get(slug).copied(),
                 Some(prev_enrollment),
-                &mut enrollment_events,
             ) {
                 Ok(enrollment) => enrollment,
                 Err(e) => {
@@ -819,7 +777,6 @@ impl<'a> EnrollmentsEvolver<'a> {
                     prev_experiments.get(slug).copied(),
                     Some(next_experiment),
                     prev_enrollment,
-                    &mut enrollment_events,
                 ) {
                     Ok(enrollment) => enrollment,
                     Err(e) => {
@@ -851,7 +808,7 @@ impl<'a> EnrollmentsEvolver<'a> {
                 "Next enrollment calculation error",
             ))
         } else {
-            Ok((next_enrollments, enrollment_events))
+            Ok(next_enrollments)
         }
     }
 
@@ -890,7 +847,6 @@ impl<'a> EnrollmentsEvolver<'a> {
         prev_experiment: Option<&Experiment>,
         next_experiment: Option<&Experiment>,
         prev_enrollment: Option<&ExperimentEnrollment>,
-        out_enrollment_events: &mut Vec<EnrollmentChangeEvent>, // out param containing the events we'd like to emit to glean.
     ) -> Result<Option<ExperimentEnrollment>> {
         let is_already_enrolled = if let Some(enrollment) = prev_enrollment {
             enrollment.status.is_enrolled()
@@ -909,11 +865,10 @@ impl<'a> EnrollmentsEvolver<'a> {
                 self.available_randomization_units,
                 &targeting_attributes,
                 experiment,
-                out_enrollment_events,
             )?),
             // Experiment deleted remotely.
             (Some(_), None, Some(enrollment)) => {
-                enrollment.on_experiment_ended(out_enrollment_events)
+                enrollment.on_experiment_ended()
             }
             // Known experiment.
             (Some(_), Some(experiment), Some(enrollment)) => {
@@ -923,7 +878,6 @@ impl<'a> EnrollmentsEvolver<'a> {
                     self.available_randomization_units,
                     &targeting_attributes,
                     experiment,
-                    out_enrollment_events,
                 )?)
             }
             (None, None, Some(enrollment)) => enrollment.maybe_garbage_collect(),
@@ -1128,70 +1082,34 @@ impl EnrolledFeatureConfig {
     }
 }
 
-#[derive(Debug)]
-pub struct EnrollmentChangeEvent {
-    pub experiment_slug: String,
-    pub branch_slug: String,
-    pub enrollment_id: String,
-    pub reason: Option<String>,
-    pub change: EnrollmentChangeEventType,
-}
-
-impl EnrollmentChangeEvent {
-    pub(crate) fn new(
-        slug: &str,
-        enrollment_id: &Uuid,
-        branch: &str,
-        reason: Option<&str>,
-        change: EnrollmentChangeEventType,
-    ) -> Self {
-        Self {
-            experiment_slug: slug.to_owned(),
-            branch_slug: branch.to_owned(),
-            reason: reason.map(|s| s.to_owned()),
-            enrollment_id: enrollment_id.to_string(),
-            change,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum EnrollmentChangeEventType {
-    Enrollment,
-    Disqualification,
-    Unenrollment,
-}
-
 pub fn opt_in_with_branch(
     db: &Database,
     writer: &mut Writer,
     experiment_slug: &str,
     branch: &str,
-) -> Result<Vec<EnrollmentChangeEvent>> {
-    let mut events = vec![];
+) -> Result<()> {
     let exp: Experiment = db
         .get_store(StoreId::Experiments)
         .get(writer, experiment_slug)?
         .ok_or_else(|| NimbusError::NoSuchExperiment(experiment_slug.to_owned()))?;
-    let enrollment = ExperimentEnrollment::from_explicit_opt_in(&exp, branch, &mut events)?;
+    let enrollment = ExperimentEnrollment::from_explicit_opt_in(&exp, branch)?;
     db.get_store(StoreId::Enrollments)
         .put(writer, experiment_slug, &enrollment)?;
-    Ok(events)
+    Ok(())
 }
 
 pub fn opt_out(
     db: &Database,
     writer: &mut Writer,
     experiment_slug: &str,
-) -> Result<Vec<EnrollmentChangeEvent>> {
-    let mut events = vec![];
+) -> Result<()> {
     let enr_store = db.get_store(StoreId::Enrollments);
     let existing_enrollment: ExperimentEnrollment = enr_store
         .get(writer, experiment_slug)?
         .ok_or_else(|| NimbusError::NoSuchExperiment(experiment_slug.to_owned()))?;
-    let updated_enrollment = existing_enrollment.on_explicit_opt_out(&mut events);
+    let updated_enrollment = existing_enrollment.on_explicit_opt_out();
     enr_store.put(writer, experiment_slug, &updated_enrollment)?;
-    Ok(events)
+    Ok(())
 }
 
 pub fn get_global_user_participation<'r>(
@@ -1221,18 +1139,17 @@ pub fn set_global_user_participation(
 pub fn reset_telemetry_identifiers(
     db: &Database,
     writer: &mut Writer,
-) -> Result<Vec<EnrollmentChangeEvent>> {
-    let mut events = vec![];
+) -> Result<()> {
     let store = db.get_store(StoreId::Enrollments);
     let enrollments: Vec<ExperimentEnrollment> = store.collect_all(writer)?;
     let updated_enrollments = enrollments
         .iter()
-        .map(|enrollment| enrollment.reset_telemetry_identifiers(&mut events));
+        .map(|enrollment| enrollment.reset_telemetry_identifiers());
     store.clear(writer)?;
     for enrollment in updated_enrollments {
         store.put(writer, &enrollment.slug, &enrollment)?;
     }
-    Ok(events)
+    Ok(())
 }
 
 fn now_secs() -> u64 {
@@ -1746,17 +1663,14 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment = evolver
-            .evolve_enrollment(true, None, Some(exp), None, &mut events)?
+            .evolve_enrollment(true, None, Some(exp), None)?
             .unwrap();
         assert!(matches!(
             enrollment.status,
             EnrollmentStatus::Enrolled { .. }
         ));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].change, EnrollmentChangeEventType::Enrollment);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
         Ok(())
     }
 
@@ -1767,9 +1681,8 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment = evolver
-            .evolve_enrollment(true, None, Some(&exp), None, &mut events)?
+            .evolve_enrollment(true, None, Some(&exp), None)?
             .unwrap();
         assert!(matches!(
             enrollment.status,
@@ -1777,7 +1690,7 @@ mod tests {
                 reason: NotEnrolledReason::NotSelected
             }
         ));
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -1787,9 +1700,8 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment = evolver
-            .evolve_enrollment(false, None, Some(&exp), None, &mut events)?
+            .evolve_enrollment(false, None, Some(&exp), None)?
             .unwrap();
         assert!(matches!(
             enrollment.status,
@@ -1797,7 +1709,7 @@ mod tests {
                 reason: NotEnrolledReason::OptOut
             }
         ));
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -1808,9 +1720,8 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment = evolver
-            .evolve_enrollment(true, None, Some(&exp), None, &mut events)?
+            .evolve_enrollment(true, None, Some(&exp), None)?
             .unwrap();
         assert!(matches!(
             enrollment.status,
@@ -1818,7 +1729,7 @@ mod tests {
                 reason: NotEnrolledReason::EnrollmentsPaused
             }
         ));
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -1828,7 +1739,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
             status: EnrollmentStatus::NotEnrolled {
@@ -1841,11 +1751,10 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert_eq!(enrollment.status, existing_enrollment.status);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -1856,7 +1765,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
             status: EnrollmentStatus::NotEnrolled {
@@ -1869,11 +1777,10 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert_eq!(enrollment.status, existing_enrollment.status);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -1884,7 +1791,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
             status: EnrollmentStatus::NotEnrolled {
@@ -1897,7 +1803,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert!(matches!(
@@ -1906,7 +1811,7 @@ mod tests {
                 reason: NotEnrolledReason::NotSelected
             }
         ));
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -1916,7 +1821,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
             status: EnrollmentStatus::NotEnrolled {
@@ -1929,7 +1833,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert!(matches!(
@@ -1939,9 +1842,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].change, EnrollmentChangeEventType::Enrollment);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
         Ok(())
     }
 
@@ -1951,7 +1852,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -1967,7 +1867,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert!(matches!(
@@ -1977,15 +1876,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].enrollment_id, enrollment_id.to_string());
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].branch_slug, "control");
-        assert_eq!(events[0].reason, Some("optout".to_owned()));
-        assert_eq!(
-            events[0].change,
-            EnrollmentChangeEventType::Disqualification
-        );
+        assert!(nimbus_events::disqualification.test_get_value("events").is_some());
         Ok(())
     }
 
@@ -1996,7 +1887,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2012,7 +1902,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         dbg!(&enrollment.status);
@@ -2028,7 +1917,7 @@ mod tests {
         } else {
             panic!("Wrong variant!");
         }
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -2039,7 +1928,6 @@ mod tests {
         app_ctx.app_name = "foobar".to_owned(); // Make the experiment targeting fail.
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2055,7 +1943,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         if let EnrollmentStatus::Disqualified {
@@ -2070,15 +1957,7 @@ mod tests {
         } else {
             panic!("Wrong variant! \n{:#?}", enrollment.status);
         }
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].enrollment_id, enrollment_id.to_string());
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].branch_slug, "control");
-        assert_eq!(events[0].reason, Some("targeting".to_owned()));
-        assert_eq!(
-            events[0].change,
-            EnrollmentChangeEventType::Disqualification
-        );
+        assert!(nimbus_events::disqualification.test_get_value("events").is_some());
         Ok(())
     }
 
@@ -2089,7 +1968,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2105,11 +1983,10 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert_eq!(enrollment, existing_enrollment);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -2133,7 +2010,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2149,11 +2025,10 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert_eq!(enrollment, existing_enrollment);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -2169,7 +2044,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2185,7 +2059,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert!(matches!(
@@ -2195,14 +2068,7 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].change,
-            EnrollmentChangeEventType::Disqualification
-        );
-        assert_eq!(events[0].enrollment_id, enrollment_id.to_string());
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].branch_slug, "control");
+        assert!(nimbus_events::disqualification.test_get_value("events").is_some());
         Ok(())
     }
 
@@ -2212,7 +2078,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2228,7 +2093,6 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert!(matches!(
@@ -2238,7 +2102,7 @@ mod tests {
                 ..
             }
         ));
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -2248,7 +2112,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2264,11 +2127,10 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert_eq!(enrollment, existing_enrollment);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -2283,7 +2145,7 @@ mod tests {
         let existing_experiments: Vec<Experiment> = vec![];
         let existing_enrollments: Vec<ExperimentEnrollment> = vec![];
         let updated_experiments = get_feature_conflict_test_experiments();
-        let (enrollments, _events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &existing_experiments,
             &updated_experiments,
@@ -2322,7 +2184,7 @@ mod tests {
         let existing_experiments: Vec<Experiment> = updated_experiments;
         let existing_enrollments: Vec<ExperimentEnrollment> = enrollments;
         let updated_experiments = get_feature_conflict_test_experiments();
-        let (enrollments, _events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &existing_experiments,
             &updated_experiments,
@@ -2349,7 +2211,7 @@ mod tests {
         let existing_experiments: Vec<Experiment> = updated_experiments;
         let existing_enrollments: Vec<ExperimentEnrollment> = enrollments;
         let updated_experiments = get_feature_conflict_test_experiments();
-        let (enrollments, _events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &existing_experiments,
             &updated_experiments,
@@ -2372,7 +2234,7 @@ mod tests {
         let existing_experiments: Vec<Experiment> = updated_experiments;
         let existing_enrollments: Vec<ExperimentEnrollment> = enrollments;
         let updated_experiments: Vec<Experiment> = vec![];
-        let (enrollments, _events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &existing_experiments,
             &updated_experiments,
@@ -2434,8 +2296,11 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let (enrollments, events) =
-            evolver.evolve_enrollments(true, &[], &test_experiments, &[])?;
+        let enrollments = evolver.evolve_enrollments(
+            true,
+            &[],
+            &test_experiments,
+            &[])?;
 
         assert_eq!(
             enrollments.len(),
@@ -2468,21 +2333,11 @@ mod tests {
             "exactly two enrollments should have Enrolled status"
         );
 
-        log::debug!("events: {:?}", events);
-
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
         assert_eq!(
             2,
-            events.len(),
-            "There should be exactly 2 enrollment_change_events"
-        );
-
-        let enrolled_events = events
-            .iter()
-            .filter(|&e| matches!(e.change, EnrollmentChangeEventType::Enrollment))
-            .count();
-        assert_eq!(
-            2, enrolled_events,
-            "exactly two events should have Enrolled event types"
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "There should be exactly 2 enrollment events"
         );
 
         Ok(())
@@ -2495,7 +2350,7 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let (enrollments, events) =
+        let enrollments =
             evolver.evolve_enrollments(true, &[], &test_experiments, &[])?;
 
         let enrolled_count = enrollments
@@ -2509,19 +2364,11 @@ mod tests {
             "There should be exactly 2 ExperimentEnrollments returned"
         );
 
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
         assert_eq!(
             2,
-            events.len(),
-            "There should be exactly 2 enrollment_change_events"
-        );
-
-        let enrolled_events = events
-            .iter()
-            .filter(|&e| matches!(e.change, EnrollmentChangeEventType::Enrollment))
-            .count();
-        assert_eq!(
-            2, enrolled_events,
-            "exactly two events should have Enrolled event types"
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "There should be exactly 2 enrollment events"
         );
         Ok(())
     }
@@ -2534,7 +2381,7 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let (enrollments, _) = evolver.evolve_enrollments(true, &[], &test_experiments, &[])?;
+        let enrollments = evolver.evolve_enrollments(true, &[], &test_experiments, &[])?;
 
         let enrolled_count = enrollments
             .iter()
@@ -2546,27 +2393,31 @@ mod tests {
         );
 
         let conflicting_experiment = get_conflicting_experiment();
-        let (enrollments, events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &test_experiments,
             &[test_experiments[1].clone(), conflicting_experiment.clone()],
             &enrollments,
         )?;
 
-        log::debug!("events = {:?}", events);
-
-        assert_eq!(events.len(), 2);
-
         // we didn't include test_experiments[1] in next_experiments above,
         // so it should have been unenrolled...
-        assert_eq!(events[0].experiment_slug, test_experiments[0].slug);
-        assert_eq!(events[0].change, EnrollmentChangeEventType::Unenrollment);
+        assert!(nimbus_events::unenrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::unenrollment.test_get_value("events").unwrap().len(),
+            "There should be exactly 1 unenrollment events"
+        );
 
         // ...which will have gotten rid of the thing that otherwise would have
         // conflicted with conflicting_experiment, allowing it to have now
         // been enrolled.
-        assert_eq!(events[1].experiment_slug, conflicting_experiment.slug);
-        assert_eq!(events[1].change, EnrollmentChangeEventType::Enrollment);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "There should be exactly 1 enrollment events"
+        );
 
         let enrolled_count = enrollments
             .iter()
@@ -2595,7 +2446,7 @@ mod tests {
         // 1. we have two experiments that use one feature each. There's no conflicts.
         let next_experiments = vec![aboutwelcome_experiment.clone(), newtab_experiment.clone()];
 
-        let (enrollments, _) = evolver.evolve_enrollments(true, &[], &next_experiments, &[])?;
+        let enrollments = evolver.evolve_enrollments(true, &[], &next_experiments, &[])?;
 
         let feature_map = map_features_by_feature_id(&enrollments, &next_experiments);
         assert_eq!(feature_map.len(), 2);
@@ -2631,14 +2482,14 @@ mod tests {
             newtab_experiment.clone(),
             mixed_experiment.clone(),
         ];
-        let (enrollments, events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
             &prev_enrollments,
         )?;
 
-        assert_eq!(events.len(), 0);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
 
         let feature_map = map_features_by_feature_id(&enrollments, &next_experiments);
         assert_eq!(feature_map.len(), 2);
@@ -2670,7 +2521,7 @@ mod tests {
         let prev_enrollments = enrollments;
         let prev_experiments = next_experiments;
         let next_experiments = vec![newtab_experiment.clone(), mixed_experiment.clone()];
-        let (enrollments, _) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
@@ -2701,7 +2552,7 @@ mod tests {
         let prev_enrollments = enrollments;
         let prev_experiments = next_experiments;
         let next_experiments = vec![mixed_experiment.clone()];
-        let (enrollments, _) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
@@ -2736,7 +2587,7 @@ mod tests {
         let prev_enrollments = vec![];
         let prev_experiments = vec![];
         let next_experiments = vec![mixed_experiment.clone()];
-        let (enrollments, _) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
@@ -2751,14 +2602,14 @@ mod tests {
             newtab_experiment,
             mixed_experiment.clone(),
         ];
-        let (enrollments, events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
             &prev_enrollments,
         )?;
 
-        assert_eq!(events.len(), 0);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         let feature_map = map_features_by_feature_id(&enrollments, &next_experiments);
         assert_eq!(feature_map.len(), 2);
         assert_eq!(
@@ -2787,14 +2638,14 @@ mod tests {
         let prev_enrollments = enrollments;
         let prev_experiments = next_experiments;
         let next_experiments = vec![mixed_experiment, multi_feature_experiment.clone()];
-        let (enrollments, events) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
             &prev_enrollments,
         )?;
 
-        assert_eq!(events.len(), 0);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         let feature_map = map_features_by_feature_id(&enrollments, &next_experiments);
         assert_eq!(feature_map.len(), 2);
         assert_eq!(
@@ -2822,7 +2673,7 @@ mod tests {
         let prev_enrollments = enrollments;
         let prev_experiments = next_experiments;
         let next_experiments = vec![multi_feature_experiment];
-        let (enrollments, _) = evolver.evolve_enrollments(
+        let enrollments = evolver.evolve_enrollments(
             true,
             &prev_experiments,
             &next_experiments,
@@ -2866,7 +2717,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -2882,11 +2732,10 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert_eq!(enrollment, existing_enrollment);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -2911,7 +2760,7 @@ mod tests {
         let test_experiments = get_test_experiments();
 
         // this should not return an error
-        let (enrollments, events) =
+        let enrollments =
             evolver.evolve_enrollments(true, &test_experiments, &test_experiments, &[])?;
 
         assert_eq!(
@@ -2920,15 +2769,11 @@ mod tests {
             "no new enrollments should have been returned"
         );
 
-        assert_eq!(
-            events.len(),
-            0,
-            "no new enrollments should have been returned"
-        );
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
 
         // Test that evolve_enrollments correctly handles the case where a
         // record with a previous enrollment gets dropped
-        let (enrollments, events) =
+        let enrollments =
             evolver.evolve_enrollments(true, &[], &test_experiments, &existing_enrollments[..])?;
 
         assert_eq!(
@@ -2937,10 +2782,11 @@ mod tests {
             "only 1 of 2 enrollments should have been returned, since one caused evolve_enrollment to err"
         );
 
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
         assert_eq!(
-            events.len(),
             1,
-            "only 1 of 2 enrollment events should have been returned, since one caused evolve_enrollment to err"
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Only 1 event should be recorded since one enrollmened caused an err"
         );
 
         Ok(())
@@ -2959,14 +2805,19 @@ mod tests {
         let test_experiments = &[test_experiment];
         // The user should get enrolled, since the targeting is OR'ing the app_id == 'org.mozilla.fenix'
         // and the 'is_already_enrolled'
-        let (enrollments, events) = evolver.evolve_enrollments(true, &[], test_experiments, &[])?;
+        let enrollments = evolver.evolve_enrollments(true, &[], test_experiments, &[])?;
         assert_eq!(
             enrollments.len(),
             1,
             "One enrollment should have been returned"
         );
 
-        assert_eq!(events.len(), 1, "One event should have been returned");
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "One enrollment should have been recorded"
+        );
 
         // we change the app_id so the targeting will only target
         // against the `is_already_enrolled`
@@ -2976,7 +2827,7 @@ mod tests {
 
         // The user should still be enrolled, since the targeting is OR'ing the app_id == 'org.mozilla.fenix'
         // and the 'is_already_enrolled'
-        let (enrollments, events) =
+        let enrollments =
             evolver.evolve_enrollments(true, test_experiments, test_experiments, &enrollments)?;
         assert_eq!(
             enrollments.len(),
@@ -2984,10 +2835,11 @@ mod tests {
             "The previous enrollment should have been evolved"
         );
 
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
         assert_eq!(
-            events.len(),
-            0,
-            "no new events should have been returned, the user was already enrolled"
+            1,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "No new events were recorded, we still have the same number"
         );
         Ok(())
     }
@@ -2998,7 +2850,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
             status: EnrollmentStatus::Error {
@@ -3012,14 +2863,18 @@ mod tests {
                 Some(&exp),
                 Some(&exp),
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         assert!(matches!(
             enrollment.status,
             EnrollmentStatus::Enrolled { .. }
         ));
-        assert_eq!(events.len(), 1);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "One enrollment should have been recorded"
+        );
         Ok(())
     }
 
@@ -3029,7 +2884,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -3045,7 +2899,6 @@ mod tests {
                 Some(&exp),
                 None,
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         if let EnrollmentStatus::WasEnrolled {
@@ -3059,11 +2912,12 @@ mod tests {
         } else {
             panic!("Wrong variant!");
         }
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].enrollment_id, enrollment_id.to_string());
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].branch_slug, "control");
-        assert_eq!(events[0].change, EnrollmentChangeEventType::Unenrollment);
+        assert!(nimbus_events::unenrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::unenrollment.test_get_value("events").unwrap().len(),
+            "One unenrollment should have been recorded"
+        );
         Ok(())
     }
 
@@ -3073,7 +2927,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
@@ -3089,7 +2942,6 @@ mod tests {
                 Some(&exp),
                 None,
                 Some(&existing_enrollment),
-                &mut events,
             )?
             .unwrap();
         if let EnrollmentStatus::WasEnrolled {
@@ -3103,11 +2955,12 @@ mod tests {
         } else {
             panic!("Wrong variant!");
         }
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].enrollment_id, enrollment_id.to_string());
-        assert_eq!(events[0].experiment_slug, exp.slug);
-        assert_eq!(events[0].branch_slug, "control");
-        assert_eq!(events[0].change, EnrollmentChangeEventType::Unenrollment);
+        assert!(nimbus_events::unenrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::unenrollment.test_get_value("events").unwrap().len(),
+            "One unenrollment should have been recorded"
+        );
         Ok(())
     }
 
@@ -3117,7 +2970,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug.clone(),
             status: EnrollmentStatus::NotEnrolled {
@@ -3129,10 +2981,9 @@ mod tests {
             Some(&exp),
             None,
             Some(&existing_enrollment),
-            &mut events,
         )?;
         assert!(enrollment.is_none());
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -3141,7 +2992,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: "secure-gold".to_owned(),
             status: EnrollmentStatus::WasEnrolled {
@@ -3151,9 +3001,9 @@ mod tests {
             },
         };
         let enrollment =
-            evolver.evolve_enrollment(true, None, None, Some(&existing_enrollment), &mut events)?;
+            evolver.evolve_enrollment(true, None, None, Some(&existing_enrollment))?;
         assert_eq!(enrollment.unwrap(), existing_enrollment);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -3162,7 +3012,6 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: "secure-gold".to_owned(),
             status: EnrollmentStatus::WasEnrolled {
@@ -3172,9 +3021,9 @@ mod tests {
             },
         };
         let enrollment =
-            evolver.evolve_enrollment(true, None, None, Some(&existing_enrollment), &mut events)?;
+            evolver.evolve_enrollment(true, None, None, Some(&existing_enrollment))?;
         assert!(enrollment.is_none());
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         Ok(())
     }
 
@@ -3197,7 +3046,6 @@ mod tests {
             None,
             Some(&exp),
             Some(&existing_enrollment),
-            &mut vec![],
         );
         assert!(res.is_err());
     }
@@ -3208,7 +3056,7 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let res = evolver.evolve_enrollment(true, Some(&exp), Some(&exp), None, &mut vec![]);
+        let res = evolver.evolve_enrollment(true, Some(&exp), Some(&exp), None);
         assert!(res.is_err());
     }
 
@@ -3219,7 +3067,7 @@ mod tests {
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
         evolver
-            .evolve_enrollment(true, None, None, None, &mut vec![])
+            .evolve_enrollment(true, None, None, None)
             .unwrap();
     }
 
@@ -3259,9 +3107,14 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let (enrollments, events) = evolver.evolve_enrollments(true, &[], recipes, &[])?;
+        let enrollments = evolver.evolve_enrollments(true, &[], recipes, &[])?;
         assert_eq!(enrollments.len(), 2);
-        assert_eq!(events.len(), 2);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            2,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Expected 2 enrollment events"
+        );
 
         assert_eq!(
             enrollments
@@ -3318,9 +3171,14 @@ mod tests {
         let (nimbus_id, app_ctx, aru) = local_ctx();
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
-        let (enrollments, events) = evolver.evolve_enrollments(true, &[], recipes, &[])?;
+        let enrollments = evolver.evolve_enrollments(true, &[], recipes, &[])?;
         assert_eq!(enrollments.len(), 3);
-        assert_eq!(events.len(), 2);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            2,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Expected 2 enrollment events"
+        );
 
         let enrollments: Vec<ExperimentEnrollment> = enrollments
             .into_iter()
@@ -3544,7 +3402,7 @@ mod tests {
         let targeting_attributes = app_ctx.into();
         let evolver = enrollment_evolver(&nimbus_id, &targeting_attributes, &aru);
 
-        let (enrollments, _events) = evolver.evolve_enrollments(true, &[], recipes, &[])?;
+        let enrollments = evolver.evolve_enrollments(true, &[], recipes, &[])?;
 
         let features = map_features_by_feature_id(&enrollments, recipes);
 
@@ -3556,8 +3414,7 @@ mod tests {
     #[test]
     fn test_enrollment_explicit_opt_in() -> Result<()> {
         let exp = get_test_experiments()[0].clone();
-        let mut events = vec![];
-        let enrollment = ExperimentEnrollment::from_explicit_opt_in(&exp, "control", &mut events)?;
+        let enrollment = ExperimentEnrollment::from_explicit_opt_in(&exp, "control")?;
         assert!(matches!(
             enrollment.status,
             EnrollmentStatus::Enrolled {
@@ -3565,26 +3422,25 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].change,
-            EnrollmentChangeEventType::Enrollment
-        ));
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Expected 1 enrollment event"
+        );
         Ok(())
     }
 
     #[test]
     fn test_enrollment_explicit_opt_in_branch_unknown() {
         let exp = get_test_experiments()[0].clone();
-        let mut events = vec![];
-        let res = ExperimentEnrollment::from_explicit_opt_in(&exp, "bobo", &mut events);
+        let res = ExperimentEnrollment::from_explicit_opt_in(&exp, "bobo");
         assert!(res.is_err());
     }
 
     #[test]
     fn test_enrollment_enrolled_explicit_opt_out() {
         let exp = get_test_experiments()[0].clone();
-        let mut events = vec![];
         let enrollment_id = Uuid::new_v4();
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug,
@@ -3594,7 +3450,7 @@ mod tests {
                 reason: EnrolledReason::Qualified,
             },
         };
-        let enrollment = existing_enrollment.on_explicit_opt_out(&mut events);
+        let enrollment = existing_enrollment.on_explicit_opt_out();
         if let EnrollmentStatus::Disqualified {
             enrollment_id: new_enrollment_id,
             branch,
@@ -3606,24 +3462,24 @@ mod tests {
         } else {
             panic!("Wrong variant!");
         }
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].change,
-            EnrollmentChangeEventType::Disqualification
-        ));
+        assert!(nimbus_events::disqualification.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::disqualification.test_get_value("events").unwrap().len(),
+            "Expected 1 disqualification event"
+        );
     }
 
     #[test]
     fn test_enrollment_not_enrolled_explicit_opt_out() {
         let exp = get_test_experiments()[0].clone();
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug,
             status: EnrollmentStatus::NotEnrolled {
                 reason: NotEnrolledReason::NotTargeted,
             },
         };
-        let enrollment = existing_enrollment.on_explicit_opt_out(&mut events);
+        let enrollment = existing_enrollment.on_explicit_opt_out();
         assert!(matches!(
             enrollment.status,
             EnrollmentStatus::NotEnrolled {
@@ -3631,13 +3487,12 @@ mod tests {
                 ..
             }
         ));
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
     }
 
     #[test]
     fn test_enrollment_disqualified_explicit_opt_out() {
         let exp = get_test_experiments()[0].clone();
-        let mut events = vec![];
         let existing_enrollment = ExperimentEnrollment {
             slug: exp.slug,
             status: EnrollmentStatus::Disqualified {
@@ -3646,9 +3501,9 @@ mod tests {
                 reason: DisqualifiedReason::NotTargeted,
             },
         };
-        let enrollment = existing_enrollment.on_explicit_opt_out(&mut events);
+        let enrollment = existing_enrollment.on_explicit_opt_out();
         assert_eq!(enrollment, existing_enrollment);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
     }
 
     // Older tests that also use the DB.
@@ -3673,7 +3528,7 @@ mod tests {
         assert_eq!(get_enrollments(&db, &writer)?.len(), 0);
 
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, &[exp1])?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, &[exp1])?;
 
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 1);
@@ -3686,14 +3541,12 @@ mod tests {
         );
         assert!(enrollment.branch_slug == "control" || enrollment.branch_slug == "treatment");
         // Ensure the event was created too.
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert_eq!(event.experiment_slug, "secure-gold");
-        assert!(event.branch_slug == "control" || event.branch_slug == "treatment");
-        assert!(matches!(
-            event.change,
-            EnrollmentChangeEventType::Enrollment
-        ));
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Expected 1 enrollment event"
+        );
 
         // Get the ExperimentEnrollment from the DB.
         let ee: ExperimentEnrollment = db
@@ -3755,28 +3608,32 @@ mod tests {
         let exps = get_test_experiments();
 
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
 
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 2);
-        assert_eq!(events.len(), 2);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            2,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Expected 2 enrollment events"
+        );
 
         // pretend we just updated from the server and one of the 2 is missing.
         let exps = &[exps[1].clone()];
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, exps)?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, exps)?;
 
         // should only have 1 now.
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 1);
-        // Check that the un-enrolled event was emitted.
-        assert_eq!(events.len(), 1);
-        let event = &events[0];
-        assert_eq!(event.experiment_slug, "secure-gold");
-        assert!(matches!(
-            event.change,
-            EnrollmentChangeEventType::Unenrollment
-        ));
+        // Check that the un-enrolled event was recorded.
+        assert!(nimbus_events::unenrollment.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::unenrollment.test_get_value("events").unwrap().len(),
+            "Expected 1 unenrollment event"
+        );
 
         writer.commit()?;
         Ok(())
@@ -3804,11 +3661,11 @@ mod tests {
         set_global_user_participation(&db, &mut writer, false)?;
 
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
 
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 0);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
         // We should see the experiment non-enrollments.
         assert_eq!(get_experiment_enrollments(&db, &writer)?.len(), 2);
         let num_not_enrolled_enrollments = get_experiment_enrollments(&db, &writer)?
@@ -3828,11 +3685,16 @@ mod tests {
         set_global_user_participation(&db, &mut writer, true)?;
 
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
 
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 2);
-        assert_eq!(events.len(), 2);
+        assert!(nimbus_events::enrollment.test_get_value("events").is_some());
+        assert_eq!(
+            2,
+            nimbus_events::enrollment.test_get_value("events").unwrap().len(),
+            "Expected 2 enrollment events"
+        );
         // We should see 2 experiment enrollments.
         assert_eq!(get_experiment_enrollments(&db, &writer)?.len(), 2);
         let num_enrolled_enrollments = get_experiment_enrollments(&db, &writer)?
@@ -3845,11 +3707,16 @@ mod tests {
         set_global_user_participation(&db, &mut writer, false)?;
 
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
 
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 0);
-        assert_eq!(events.len(), 2);
+        assert!(nimbus_events::disqualification.test_get_value("events").is_some());
+        assert_eq!(
+            2,
+            nimbus_events::disqualification.test_get_value("events").unwrap().len(),
+            "Expected 2 disqualification events"
+        );
         // We should see 2 experiment enrolments, this time they're both opt outs
         assert_eq!(get_experiment_enrollments(&db, &writer)?.len(), 2);
 
@@ -3873,11 +3740,11 @@ mod tests {
         set_global_user_participation(&db, &mut writer, true)?;
 
         let evolver = EnrollmentsEvolver::new(&nimbus_id, &aru, &targeting_attributes);
-        let events = evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
+        evolver.evolve_enrollments_in_db(&db, &mut writer, &exps)?;
 
         let enrollments = get_enrollments(&db, &writer)?;
         assert_eq!(enrollments.len(), 0);
-        assert!(events.is_empty());
+        assert!(nimbus_events::enrollment.test_get_value("events").is_none());
 
         assert_eq!(
             get_experiment_enrollments(&db, &writer)?
@@ -3950,7 +3817,7 @@ mod tests {
         writer.commit()?;
 
         let mut writer = db.write()?;
-        let events = reset_telemetry_identifiers(&db, &mut writer)?;
+        reset_telemetry_identifiers(&db, &mut writer)?;
         writer.commit()?;
 
         let enrollments = db.collect_all::<ExperimentEnrollment>(StoreId::Enrollments)?;
@@ -3989,18 +3856,12 @@ mod tests {
         ));
 
         // We should have returned a single disqualification event.
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], EnrollmentChangeEvent {
-            change: EnrollmentChangeEventType::Disqualification,
-            reason: Some(reason),
-            experiment_slug,
-            branch_slug,
-            enrollment_id,
-        } if reason == "optout"
-            && *experiment_slug == mock_exp1_slug
-            && *branch_slug == mock_exp1_branch
-            && ! Uuid::parse_str(enrollment_id)?.is_nil()
-        ));
+        assert!(nimbus_events::disqualification.test_get_value("events").is_some());
+        assert_eq!(
+            1,
+            nimbus_events::disqualification.test_get_value("events").unwrap().len(),
+            "Expected 1 disqualification event"
+        );
 
         Ok(())
     }
